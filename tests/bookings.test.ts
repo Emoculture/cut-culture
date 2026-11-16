@@ -236,3 +236,79 @@ test('Vercel handler logs exactly one safe 503 event with matching X-Request-ID'
     assert.equal((body as { code: string }).code, code)
   }
 })
+
+test('new secret API key is sent only as apikey for both catalog reads and booking insert', async () => {
+  const { createDependencies } = await import('../server/dependencies.js')
+  const key = 'sb_secret_fake_test_value'
+  const observed: { operation: string; hasBearer: boolean; hasApiKey: boolean }[] = []
+  const deps = createDependencies({ ...testServerEnv, SUPABASE_SECRET_KEY: key }, async (url, init) => {
+    const headers = new Headers(init?.headers)
+    observed.push({ operation: new URL(String(url)).pathname, hasBearer: headers.has('Authorization'), hasApiKey: headers.get('apikey') === key })
+    return init?.method === 'POST' ? new Response(null, { status: 201 }) : Response.json([])
+  })
+  await deps.repository.barberExists('1'); await deps.repository.serviceDuration('2')
+  await deps.repository.insert({ ...input, ends_at: '2026-11-17T08:00:00Z', status: 'confirmed' })
+  assert.equal(observed.length, 3)
+  assert.deepEqual(observed.map(row => row.operation), ['/rest/v1/barbers', '/rest/v1/services', '/rest/v1/bookings'])
+  assert.ok(observed.every(row => row.hasApiKey && !row.hasBearer))
+})
+
+test('legacy key Bearer behavior is preserved', async () => {
+  const { createDependencies } = await import('../server/dependencies.js')
+  const legacyKey = 'eyJhbGciOiJIUzI1NiJ9.eyJyb2xlIjoic2VydmljZV9yb2xlIn0.fake-signature'
+  const deps = createDependencies({ ...testServerEnv, SUPABASE_SECRET_KEY: legacyKey }, async (_url, init) => {
+    assert.equal(new Headers(init?.headers).get('Authorization'), `Bearer ${legacyKey}`)
+    assert.equal(new Headers(init?.headers).get('apikey'), legacyKey)
+    return Response.json([])
+  })
+  await deps.repository.barberExists('1')
+})
+
+test('42501 retains exact operation and safe scope without storing raw database text', async t => {
+  const { createDependencies } = await import('../server/dependencies.js')
+  const { BookingFailure } = await import('../server/failures.js')
+  const { logBookingFailure } = await import('../server/diagnostics.js')
+  const logs: string[] = []; t.mock.method(console, 'error', (value: string) => { logs.push(value) })
+  for (const operation of ['barbers.select', 'services.select', 'bookings.insert'] as const) {
+    for (const [message, scope] of [['permission denied for schema PRIVATE', 'schema'], ['permission denied for table PRIVATE', 'table'], ['permission denied for sequence PRIVATE', 'sequence'], ['new row violates row-level security policy for table PRIVATE', 'rls'], ['PRIVATE unknown issue', 'unknown']]) {
+      const deps = createDependencies(testServerEnv, async () => Response.json({ code: '42501', message, details: 'PRIVATE' }, { status: 403 }))
+      const call = operation === 'bookings.insert' ? deps.repository.insert({ ...input, ends_at: '2026-11-17T08:00:00Z', status: 'confirmed' }) : operation === 'barbers.select' ? deps.repository.barberExists('1') : deps.repository.serviceDuration('2')
+      await assert.rejects(call, error => {
+        assert.ok(error instanceof BookingFailure); assert.equal(error.code, 'SUPABASE_PERMISSION_DENIED')
+        assert.deepEqual(error.details, { operation, permission_scope: scope })
+        logBookingFailure(error.code, '01234567-89ab-4def-8123-456789abcdef', error.details)
+        assert.ok(!JSON.stringify(error).includes('PRIVATE')); return true
+      })
+    }
+  }
+  assert.equal(logs.length, 15); assert.ok(!logs.join('').includes('PRIVATE'))
+  assert.equal(JSON.parse(logs[0]).operation, 'barbers.select')
+})
+
+test('installed SDK completes protected server flow with new key and preserves Redis authorization', async () => {
+  const { createDependencies } = await import('../server/dependencies.js')
+  const key = 'sb_secret_fake_protected_transport'
+  let inserted = false; let redisChecked = false
+  const deps = createDependencies({ ...testServerEnv, SUPABASE_SECRET_KEY: key }, async (url, init) => {
+    const headers = new Headers(init?.headers)
+    if (String(url) === testServerEnv.UPSTASH_REDIS_REST_URL) {
+      assert.equal(headers.get('Authorization'), `Bearer ${testServerEnv.UPSTASH_REDIS_REST_TOKEN}`)
+      redisChecked = true; return Response.json({ result: 1 })
+    }
+    // Simulated authenticated gateway: a missing apikey or the opaque key in
+    // Authorization is rejected. No real Supabase requests or records are used.
+    assert.equal(headers.get('apikey'), key); assert.equal(headers.has('Authorization'), false)
+    const path = new URL(String(url)).pathname
+    if (path.endsWith('/barbers')) return Response.json([{ id: 1 }])
+    if (path.endsWith('/services')) return Response.json([{ duration_minutes: 60 }])
+    assert.equal(path, '/rest/v1/bookings'); assert.equal(init?.method, 'POST')
+    const row = JSON.parse(String(init?.body)); assert.equal(row.status, 'confirmed')
+    assert.equal(row.ends_at, '2026-11-17T08:00:00.000Z')
+    assert.equal(headers.get('Prefer')?.includes('return=representation') ?? false, false)
+    inserted = true; return new Response(null, { status: 201 })
+  })
+  deps.now = () => now
+  const { request } = fixture(); request.origin = testServerEnv.BOOKING_ALLOWED_ORIGIN
+  const response = await handleBooking(request, deps)
+  assert.equal(response.status, 201); assert.ok(redisChecked); assert.ok(inserted)
+})

@@ -12,8 +12,11 @@ export const failureCodes = [
   'SUPABASE_INSERT_UNEXPECTED_FAILURE', 'BOOKING_UNEXPECTED_FAILURE', 'HANDLER_UNEXPECTED_FAILURE',
 ] as const
 export type FailureCode = typeof failureCodes[number]
+export const operations = ['barbers.select', 'services.select', 'bookings.insert'] as const
+export const permissionScopes = ['schema', 'table', 'sequence', 'rls', 'unknown'] as const
+export interface FailureDetails { operation: typeof operations[number]; permission_scope?: typeof permissionScopes[number] }
 export class BookingFailure extends Error {
-  constructor(public readonly code: FailureCode) { super(code) }
+  constructor(public readonly code: FailureCode, public readonly details?: FailureDetails) { super(code) }
 }
 export function failureCode(error: unknown, fallback: FailureCode): FailureCode {
   return error instanceof BookingFailure && failureCodes.includes(error.code) ? error.code : fallback

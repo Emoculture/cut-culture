@@ -72,3 +72,45 @@ Origin — 403; ни Redis, ни Origin, ни RLS не отключены.
 реальный адаптер Supabase SDK и обёртку Vercel, не создавая записей в базе.
 
 Политики/схема БД не менялись. Публичные INSERT/SELECT bookings не добавляются.
+
+## Investigation: sb_secret_ and 42501
+
+Installed SDK is @supabase/supabase-js 2.119.0. A mocked transport verified that
+its REST wrapper sends an opaque sb_secret_ key both as apikey and as a Bearer
+fallback. The special omission for new keys in this SDK is used for Edge
+Functions, not these REST queries. This is a confirmed header behavior, not proof
+that it caused a specific production 42501. See Supabase's guidance:
+https://supabase.com/docs/guides/getting-started/migrating-to-new-api-keys
+
+The server transport removes only Authorization exactly equal to Bearer + the configured
+sb_secret_ key in the final server transport. apikey remains unchanged. Legacy
+JWT keys and distinct authorization tokens are not rewritten. No user sessions
+or incoming Authorization headers are forwarded by the booking handler.
+
+Previously every 42501 became SUPABASE_PERMISSION_DENIED without identifying the
+operation or kind of denial. This covers schema/table/sequence grants, RLS and
+possibly permissions within triggers/functions; it is not evidence of a bad key.
+A JWT verification failure ordinarily has a different code. The historical
+request f101b631-3a96-481b-8393-74727cf26973 cannot be assigned to an operation
+from the old log alone, since catalog reads run concurrently.
+
+Diagnostics add fixed allowlisted fields to booking_failed:
+- operation: barbers.select, services.select or bookings.insert;
+- permission_scope for 42501: schema, table, sequence, rls or unknown.
+
+Raw errors are inspected only to classify these categories; no names of database
+objects or raw error messages, headers, keys or personal data are logged. Operation
+metadata does not assert the failing SQL object: an INSERT trigger may fail on
+another table. The response still contains the safe common error code.
+
+SQL privileges have not been changed by this fix. If permissions remain the
+confirmed cause, an administrator must inspect service_role grants on the schema,
+required catalog columns, booking INSERT columns and the real id sequence/default.
+Apply only missing privileges after review. Keep RLS enabled, do not grant
+anon/authenticated/PUBLIC direct booking access, and do not add SELECT bookings.
+
+To finish the production diagnosis, inspect the matching Supabase API log path
+(GET barbers, GET services or POST bookings), SQLSTATE and effective role/permission
+category, without copying payloads/credentials. Alternatively, after deployment,
+use the diagnostics and correlate a new invocation's Request ID.
+Only real API results and administrator checks can establish the final root cause.

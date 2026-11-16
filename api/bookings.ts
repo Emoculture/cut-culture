@@ -22,7 +22,7 @@ export function createBookingHandler(makeDependencies: () => Dependencies = () =
         logBookingFailure('FORWARDED_IP_MISSING', requestId)
         return res.status(503).json({ error: 'Сервис временно недоступен.', code: 'FORWARDED_IP_MISSING' })
       }
-      const result = await handleBooking({ method: req.method, origin: typeof req.headers.origin === 'string' ? req.headers.origin : undefined, contentType: req.headers['content-type'], body: req.body, ip }, { ...makeDependencies(), reportInvalid: code => logBookingRejection(code, requestId), reportFailure: code => logBookingFailure(code, requestId) })
+      const result = await handleBooking({ method: req.method, origin: typeof req.headers.origin === 'string' ? req.headers.origin : undefined, contentType: req.headers['content-type'], body: req.body, ip }, { ...makeDependencies(), reportInvalid: code => logBookingRejection(code, requestId), reportFailure: (code, details) => logBookingFailure(code, requestId, details) })
       if (result.status === 429) res.setHeader('Retry-After', '600')
       return res.status(result.status).json(result.body)
     } catch (error) {

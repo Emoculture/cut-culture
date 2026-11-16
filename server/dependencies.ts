@@ -2,7 +2,7 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 import { createClient } from '@supabase/supabase-js'
 import { createHmac } from 'node:crypto'
 import { BookingFailure } from './failures.js'
-import type { FailureCode } from './failures.js'
+import type { FailureCode, FailureDetails } from './failures.js'
 import type { Dependencies } from './bookings.js'
 
 function required(env: NodeJS.ProcessEnv, name: string, code: FailureCode) {
@@ -16,12 +16,22 @@ function httpsURL(value: string, code: FailureCode, originOnly = false) {
     if (url.protocol !== 'https:' || url.username || url.password || (originOnly && url.origin !== value)) throw new Error()
   } catch { throw new BookingFailure(code) }
 }
-function dbFailure(code: unknown, fallback: FailureCode): BookingFailure {
-  if (code === 'PGRST301' || code === 'PGRST302') return new BookingFailure('SUPABASE_AUTH_FAILED')
-  if (code === '42501') return new BookingFailure('SUPABASE_PERMISSION_DENIED')
-  if (['PGRST204', 'PGRST205', '42P01', '42703'].includes(String(code))) return new BookingFailure('SUPABASE_SCHEMA_MISMATCH')
-  if (['23502', '23503', '23505', '23514'].includes(String(code))) return new BookingFailure('SUPABASE_CONSTRAINT_FAILED')
-  return new BookingFailure(fallback)
+function dbFailure(error: { code?: unknown; message?: unknown }, fallback: FailureCode, operation: FailureDetails['operation']): BookingFailure {
+  const { code } = error
+  const details: FailureDetails = { operation }
+  if (code === 'PGRST301' || code === 'PGRST302') return new BookingFailure('SUPABASE_AUTH_FAILED', details)
+  if (code === '42501') {
+    // Inspect only to classify a fixed category. Never retain or log the message.
+    const message = typeof error.message === 'string' ? error.message : ''
+    details.permission_scope = /row-level security/i.test(message) ? 'rls'
+      : /permission denied for sequence/i.test(message) ? 'sequence'
+      : /permission denied for schema/i.test(message) ? 'schema'
+      : /permission denied for table/i.test(message) ? 'table' : 'unknown'
+    return new BookingFailure('SUPABASE_PERMISSION_DENIED', details)
+  }
+  if (['PGRST204', 'PGRST205', '42P01', '42703'].includes(String(code))) return new BookingFailure('SUPABASE_SCHEMA_MISMATCH', details)
+  if (['23502', '23503', '23505', '23514'].includes(String(code))) return new BookingFailure('SUPABASE_CONSTRAINT_FAILED', details)
+  return new BookingFailure(fallback, details)
 }
 export function createDependencies(env: NodeJS.ProcessEnv, fetchImpl: typeof fetch = fetch): Dependencies {
   const url = required(env, 'SUPABASE_URL', 'CONFIG_SUPABASE_URL_MISSING')
@@ -34,7 +44,13 @@ export function createDependencies(env: NodeJS.ProcessEnv, fetchImpl: typeof fet
   httpsURL(redisURL, 'CONFIG_REDIS_URL_INVALID')
   let db: SupabaseClient
   try {
-    db = createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false }, global: { fetch: (url, init) => fetchImpl(url, { ...init, signal: AbortSignal.timeout(8000) }) } })
+    db = createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false }, global: { fetch: (url, init) => {
+      const headers = new Headers(init?.headers)
+      // New API keys are opaque, not JWTs. The installed SDK also adds a Bearer
+      // fallback for REST; remove only that duplicate, keeping apikey intact.
+      if (key.startsWith('sb_secret_') && headers.get('Authorization') === `Bearer ${key}`) headers.delete('Authorization')
+      return fetchImpl(url, { ...init, headers, signal: AbortSignal.timeout(8000) })
+    } } })
   } catch { throw new BookingFailure('SUPABASE_CLIENT_INIT_FAILED') }
   return {
     origin,
@@ -65,23 +81,23 @@ export function createDependencies(env: NodeJS.ProcessEnv, fetchImpl: typeof fet
       async barberExists(id) {
         try {
           const { data, error } = await db.from('barbers').select('id').eq('id', id).maybeSingle()
-          if (error) throw dbFailure(error.code, 'SUPABASE_BARBER_QUERY_FAILED')
+          if (error) throw dbFailure(error, 'SUPABASE_BARBER_QUERY_FAILED', 'barbers.select')
           return !!data
-        } catch (error) { if (error instanceof BookingFailure) throw error; throw new BookingFailure('SUPABASE_BARBER_QUERY_FAILED') }
+        } catch (error) { if (error instanceof BookingFailure) throw error; throw new BookingFailure('SUPABASE_BARBER_QUERY_FAILED', { operation: 'barbers.select' }) }
       },
       async serviceDuration(id) {
         try {
           const { data, error } = await db.from('services').select('duration_minutes').eq('id', id).maybeSingle()
-          if (error) throw dbFailure(error.code, 'SUPABASE_SERVICE_QUERY_FAILED')
+          if (error) throw dbFailure(error, 'SUPABASE_SERVICE_QUERY_FAILED', 'services.select')
           return data ? data.duration_minutes as number : null
-        } catch (error) { if (error instanceof BookingFailure) throw error; throw new BookingFailure('SUPABASE_SERVICE_QUERY_FAILED') }
+        } catch (error) { if (error instanceof BookingFailure) throw error; throw new BookingFailure('SUPABASE_SERVICE_QUERY_FAILED', { operation: 'services.select' }) }
       },
       async insert(row) {
         try {
           const { error } = await db.from('bookings').insert(row)
-          if (error && error.code !== '23P01') throw dbFailure(error.code, 'SUPABASE_INSERT_FAILED')
+          if (error && error.code !== '23P01') throw dbFailure(error, 'SUPABASE_INSERT_FAILED', 'bookings.insert')
           return { error }
-        } catch (error) { if (error instanceof BookingFailure) throw error; throw new BookingFailure('SUPABASE_INSERT_FAILED') }
+        } catch (error) { if (error instanceof BookingFailure) throw error; throw new BookingFailure('SUPABASE_INSERT_FAILED', { operation: 'bookings.insert' }) }
       },
     },
   }

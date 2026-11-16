@@ -1,5 +1,5 @@
 import { BookingFailure, failureCode } from './failures.js'
-import type { FailureCode } from './failures.js'
+import type { FailureCode, FailureDetails } from './failures.js'
 import { InvalidInput, validateInput } from '../src/integrations/booking-validation.js'
 import type { BookingInput } from '../src/integrations/booking-validation.js'
 import type { BookingErrorCode } from '../src/integrations/booking-errors.js'
@@ -15,7 +15,7 @@ export interface Dependencies {
   limit(ip: string): Promise<boolean>
   repository: Repository
   now?: () => number
-  reportFailure?: (code: FailureCode) => void
+  reportFailure?: (code: FailureCode, details?: FailureDetails) => void
   reportInvalid?: (code: BookingErrorCode) => void
 }
 export function calculateEnd(startISO: string, duration: number, now: number): string {
@@ -56,7 +56,7 @@ export async function handleBooking(request: { method?: string; origin?: string;
       return { status: 400, body: { error: error.message, code: error.code } }
     }
     const code = failureCode(error, fallback)
-    deps.reportFailure?.(code)
+    deps.reportFailure?.(code, error instanceof BookingFailure ? error.details : undefined)
     return { status: 503, body: { error: 'Сервис временно недоступен. Сохранение записи не подтверждено.', code } }
   }
 }
