@@ -7,7 +7,7 @@
     "dev": "vite --host 0.0.0.0",
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 0.0.0.0",
-    "test": "node --import tsx tests/bookings.test.ts"
+    "test": "node --import tsx tests/run.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.119.0",

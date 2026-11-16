@@ -1,5 +1,10 @@
 {
   "functions": {
-    "api/bookings.ts": { "maxDuration": 30 }
+    "api/bookings.ts": {
+      "maxDuration": 30
+    },
+    "api/telegram-webhook.ts": {
+      "maxDuration": 30
+    }
   }
 }
