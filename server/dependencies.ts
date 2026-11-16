@@ -1,0 +1,88 @@
+import type { SupabaseClient } from '@supabase/supabase-js'
+import { createClient } from '@supabase/supabase-js'
+import { createHmac } from 'node:crypto'
+import { BookingFailure } from './failures.js'
+import type { FailureCode } from './failures.js'
+import type { Dependencies } from './bookings.js'
+
+function required(env: NodeJS.ProcessEnv, name: string, code: FailureCode) {
+  const value = env[name]
+  if (!value?.trim()) throw new BookingFailure(code)
+  return value
+}
+function httpsURL(value: string, code: FailureCode, originOnly = false) {
+  try {
+    const url = new URL(value)
+    if (url.protocol !== 'https:' || url.username || url.password || (originOnly && url.origin !== value)) throw new Error()
+  } catch { throw new BookingFailure(code) }
+}
+function dbFailure(code: unknown, fallback: FailureCode): BookingFailure {
+  if (code === 'PGRST301' || code === 'PGRST302') return new BookingFailure('SUPABASE_AUTH_FAILED')
+  if (code === '42501') return new BookingFailure('SUPABASE_PERMISSION_DENIED')
+  if (['PGRST204', 'PGRST205', '42P01', '42703'].includes(String(code))) return new BookingFailure('SUPABASE_SCHEMA_MISMATCH')
+  if (['23502', '23503', '23505', '23514'].includes(String(code))) return new BookingFailure('SUPABASE_CONSTRAINT_FAILED')
+  return new BookingFailure(fallback)
+}
+export function createDependencies(env: NodeJS.ProcessEnv, fetchImpl: typeof fetch = fetch): Dependencies {
+  const url = required(env, 'SUPABASE_URL', 'CONFIG_SUPABASE_URL_MISSING')
+  const key = required(env, 'SUPABASE_SECRET_KEY', 'CONFIG_SUPABASE_SECRET_KEY_MISSING')
+  const origin = required(env, 'BOOKING_ALLOWED_ORIGIN', 'CONFIG_ORIGIN_MISSING')
+  const redisURL = required(env, 'UPSTASH_REDIS_REST_URL', 'CONFIG_REDIS_URL_MISSING')
+  const redisToken = required(env, 'UPSTASH_REDIS_REST_TOKEN', 'CONFIG_REDIS_TOKEN_MISSING')
+  httpsURL(url, 'CONFIG_SUPABASE_URL_INVALID')
+  httpsURL(origin, 'CONFIG_ORIGIN_INVALID', true)
+  httpsURL(redisURL, 'CONFIG_REDIS_URL_INVALID')
+  let db: SupabaseClient
+  try {
+    db = createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false }, global: { fetch: (url, init) => fetchImpl(url, { ...init, signal: AbortSignal.timeout(8000) }) } })
+  } catch { throw new BookingFailure('SUPABASE_CLIENT_INIT_FAILED') }
+  return {
+    origin,
+    async limit(ip) {
+      const hash = createHmac('sha256', redisToken).update(ip).digest('hex')
+      let response: Response
+      try {
+        response = await fetchImpl(redisURL, {
+          method: 'POST', headers: { Authorization: `Bearer ${redisToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(['EVAL', "local n=redis.call('INCR',KEYS[1]); if n==1 then redis.call('EXPIRE',KEYS[1],600) end; return n", '1', `cut-culture:booking:${hash}`]),
+          signal: AbortSignal.timeout(3000),
+        })
+      } catch (error) {
+        const name = error instanceof Error ? error.name : ''
+        throw new BookingFailure(name === 'TimeoutError' || name === 'AbortError' ? 'REDIS_TIMEOUT' : 'REDIS_NETWORK_FAILED')
+      }
+      if (response.status === 401 || response.status === 403) throw new BookingFailure('REDIS_AUTH_FAILED')
+      if (!response.ok) throw new BookingFailure('REDIS_HTTP_FAILED')
+      try {
+        const value: unknown = await response.json()
+        if (!value || typeof value !== 'object') throw new Error()
+        const result = value as { result?: unknown; error?: unknown }
+        if (result.error || typeof result.result !== 'number' || !Number.isSafeInteger(result.result) || result.result < 1) throw new Error()
+        return result.result <= 5
+      } catch { throw new BookingFailure('REDIS_RESPONSE_INVALID') }
+    },
+    repository: {
+      async barberExists(id) {
+        try {
+          const { data, error } = await db.from('barbers').select('id').eq('id', id).maybeSingle()
+          if (error) throw dbFailure(error.code, 'SUPABASE_BARBER_QUERY_FAILED')
+          return !!data
+        } catch (error) { if (error instanceof BookingFailure) throw error; throw new BookingFailure('SUPABASE_BARBER_QUERY_FAILED') }
+      },
+      async serviceDuration(id) {
+        try {
+          const { data, error } = await db.from('services').select('duration_minutes').eq('id', id).maybeSingle()
+          if (error) throw dbFailure(error.code, 'SUPABASE_SERVICE_QUERY_FAILED')
+          return data ? data.duration_minutes as number : null
+        } catch (error) { if (error instanceof BookingFailure) throw error; throw new BookingFailure('SUPABASE_SERVICE_QUERY_FAILED') }
+      },
+      async insert(row) {
+        try {
+          const { error } = await db.from('bookings').insert(row)
+          if (error && error.code !== '23P01') throw dbFailure(error.code, 'SUPABASE_INSERT_FAILED')
+          return { error }
+        } catch (error) { if (error instanceof BookingFailure) throw error; throw new BookingFailure('SUPABASE_INSERT_FAILED') }
+      },
+    },
+  }
+}

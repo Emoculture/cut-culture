@@ -139,3 +139,100 @@ test('UI uses allowlisted specific errors and never echoes untrusted server text
   }
   assert.ok(!bookingResponseError(503, { code: 'INVALID_PHONE' }).includes('Запись подтверждена'))
 })
+
+test('503 fallbacks report safe stage codes, never exception messages', async () => {
+  for (const stage of ['redis', 'catalog', 'insert', 'duration', 'insertError'] as const) {
+    const { deps, request } = fixture(); const events: string[] = []
+    deps.reportFailure = code => { events.push(code) }
+    const fail = async (): Promise<never> => { throw new Error('PRIVATE token phone name') }
+    if (stage === 'redis') deps.limit = fail
+    if (stage === 'catalog') deps.repository.barberExists = fail
+    if (stage === 'insert') deps.repository.insert = fail
+    if (stage === 'duration') deps.repository.serviceDuration = async () => 0
+    if (stage === 'insertError') deps.repository.insert = async () => ({ error: { code: 'PRIVATE' } })
+    const expected = { redis: 'REDIS_UNEXPECTED_FAILURE', catalog: 'SUPABASE_CATALOG_UNEXPECTED_FAILURE', insert: 'SUPABASE_INSERT_UNEXPECTED_FAILURE', duration: 'SERVICE_DURATION_INVALID', insertError: 'SUPABASE_INSERT_FAILED' }[stage]
+    const result = await handleBooking(request, deps)
+    assert.equal(result.status, 503); assert.equal('code' in result.body && result.body.code, expected)
+    assert.deepEqual(events, [expected]); assert.ok(!JSON.stringify(result).includes('PRIVATE')); assert.ok(!('saved' in result.body))
+  }
+})
+
+const testServerEnv = {
+  SUPABASE_URL: 'https://test.supabase.co', SUPABASE_SECRET_KEY: 'test-server-key',
+  BOOKING_ALLOWED_ORIGIN: 'https://cut-culture.vercel.app',
+  UPSTASH_REDIS_REST_URL: 'https://test-redis.example', UPSTASH_REDIS_REST_TOKEN: 'test-redis-token',
+}
+test('configuration diagnostics identify missing and invalid fields without values', async () => {
+  const { createDependencies } = await import('../server/dependencies.js')
+  const { BookingFailure } = await import('../server/failures.js')
+  const missing = { SUPABASE_URL: 'CONFIG_SUPABASE_URL_MISSING', SUPABASE_SECRET_KEY: 'CONFIG_SUPABASE_SECRET_KEY_MISSING', BOOKING_ALLOWED_ORIGIN: 'CONFIG_ORIGIN_MISSING', UPSTASH_REDIS_REST_URL: 'CONFIG_REDIS_URL_MISSING', UPSTASH_REDIS_REST_TOKEN: 'CONFIG_REDIS_TOKEN_MISSING' }
+  for (const [key, code] of Object.entries(missing)) {
+    assert.throws(() => createDependencies({ ...testServerEnv, [key]: '' }), error => error instanceof BookingFailure && error.code === code)
+  }
+  for (const [key, code] of [['SUPABASE_URL', 'CONFIG_SUPABASE_URL_INVALID'], ['BOOKING_ALLOWED_ORIGIN', 'CONFIG_ORIGIN_INVALID'], ['UPSTASH_REDIS_REST_URL', 'CONFIG_REDIS_URL_INVALID']]) {
+    assert.throws(() => createDependencies({ ...testServerEnv, [key]: 'PRIVATE invalid URL' }), error => error instanceof BookingFailure && error.code === code && !error.message.includes('PRIVATE'))
+  }
+})
+
+test('Redis HTTP, auth, timeout, network and invalid responses fail closed', async () => {
+  const { createDependencies } = await import('../server/dependencies.js')
+  const { BookingFailure } = await import('../server/failures.js')
+  const cases: [() => Promise<Response>, string][] = [
+    [async () => new Response('PRIVATE', { status: 401 }), 'REDIS_AUTH_FAILED'],
+    [async () => new Response('PRIVATE', { status: 403 }), 'REDIS_AUTH_FAILED'],
+    [async () => new Response('PRIVATE', { status: 500 }), 'REDIS_HTTP_FAILED'],
+    [async () => { throw new DOMException('PRIVATE', 'TimeoutError') }, 'REDIS_TIMEOUT'],
+    [async () => { throw new TypeError('PRIVATE') }, 'REDIS_NETWORK_FAILED'],
+    [async () => new Response('PRIVATE'), 'REDIS_RESPONSE_INVALID'],
+    [async () => Response.json({ error: 'PRIVATE' }), 'REDIS_RESPONSE_INVALID'],
+    [async () => Response.json({ result: 0 }), 'REDIS_RESPONSE_INVALID'],
+  ]
+  for (const [fetchMock, code] of cases) {
+    const deps = createDependencies(testServerEnv, fetchMock)
+    await assert.rejects(deps.limit('test-ip'), error => error instanceof BookingFailure && error.code === code && !error.message.includes('PRIVATE'))
+  }
+  assert.equal(await createDependencies(testServerEnv, async () => Response.json({ result: 5 })).limit('test-ip'), true)
+  assert.equal(await createDependencies(testServerEnv, async () => Response.json({ result: 6 })).limit('test-ip'), false)
+})
+
+test('real Supabase adapter maps query/write failures and preserves overlap handling', async () => {
+  const { createDependencies } = await import('../server/dependencies.js')
+  const { BookingFailure } = await import('../server/failures.js')
+  const row: BookingRow = { ...input, ends_at: '2026-11-17T08:00:00Z', status: 'confirmed' }
+  for (const [operation, expected] of [['barberExists', 'SUPABASE_BARBER_QUERY_FAILED'], ['serviceDuration', 'SUPABASE_SERVICE_QUERY_FAILED'], ['insert', 'SUPABASE_INSERT_FAILED']] as const) {
+    const deps = createDependencies(testServerEnv, async () => Response.json({ code: 'PRIVATE', message: 'PRIVATE', details: 'PRIVATE' }, { status: 500 }))
+    const call = operation === 'insert' ? deps.repository.insert(row) : deps.repository[operation]('1')
+    await assert.rejects(call, error => error instanceof BookingFailure && error.code === expected && !error.message.includes('PRIVATE'))
+  }
+  for (const [code, expected] of [['PGRST301', 'SUPABASE_AUTH_FAILED'], ['42501', 'SUPABASE_PERMISSION_DENIED'], ['PGRST204', 'SUPABASE_SCHEMA_MISMATCH'], ['42P01', 'SUPABASE_SCHEMA_MISMATCH'], ['23503', 'SUPABASE_CONSTRAINT_FAILED'], ['23514', 'SUPABASE_CONSTRAINT_FAILED']]) {
+    const deps = createDependencies(testServerEnv, async () => Response.json({ code, message: 'PRIVATE' }, { status: 403 }))
+    await assert.rejects(deps.repository.insert(row), error => error instanceof BookingFailure && error.code === expected)
+  }
+  const deps = createDependencies(testServerEnv, async () => Response.json({ code: '23P01', message: 'PRIVATE' }, { status: 409 }))
+  assert.equal((await deps.repository.insert(row)).error?.code, '23P01')
+})
+
+test('Vercel handler logs exactly one safe 503 event with matching X-Request-ID', async t => {
+  const { createBookingHandler } = await import('../api/bookings.js')
+  const { BookingFailure } = await import('../server/failures.js')
+  const logs: string[] = []; t.mock.method(console, 'error', (message: string) => { logs.push(message) })
+  const { deps } = fixture()
+  for (const scenario of ['config', 'missingIP', 'redis', 'insert', 'unexpected'] as const) {
+    logs.length = 0; const headers: Record<string, unknown> = {}; let status = 0; let body: unknown
+    const failingDeps = { ...deps, limit: async () => { throw new BookingFailure('REDIS_TIMEOUT') } }
+    const handler = createBookingHandler(() => {
+      if (scenario === 'config') throw new BookingFailure('CONFIG_REDIS_TOKEN_MISSING')
+      if (scenario === 'unexpected') throw new Error('PRIVATE raw exception')
+      if (scenario === 'redis') return failingDeps
+      return { ...deps, repository: { ...deps.repository, insert: async () => ({ error: { code: 'PRIVATE' } }) } }
+    })
+    const req = { method: 'POST', headers: { origin: deps.origin, 'content-type': 'application/json', ...(scenario === 'missingIP' ? {} : { 'x-forwarded-for': 'PRIVATE-IP' }) }, body: { ...input, client_name: 'PRIVATE-NAME' } }
+    const res = { setHeader: (key: string, value: unknown) => { headers[key] = value }, status: (value: number) => { status = value; return res }, json: (value: unknown) => { body = value; return res } }
+    await handler(req as unknown as Parameters<typeof handler>[0], res as unknown as Parameters<typeof handler>[1])
+    assert.equal(status, 503); assert.equal(logs.length, 1)
+    const code = { config: 'CONFIG_REDIS_TOKEN_MISSING', missingIP: 'FORWARDED_IP_MISSING', redis: 'REDIS_TIMEOUT', insert: 'SUPABASE_INSERT_FAILED', unexpected: 'HANDLER_UNEXPECTED_FAILURE' }[scenario]
+    assert.deepEqual(JSON.parse(logs[0]), { event: 'booking_failed', status: 503, code, request_id: headers['X-Request-ID'] })
+    assert.ok(!JSON.stringify({ logs, body }).includes('PRIVATE'))
+    assert.equal((body as { code: string }).code, code)
+  }
+})

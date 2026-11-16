@@ -161,3 +161,6 @@ Logs, но отдельные Function Logs могли быть пустыми. 
 
 В Codex реальный production payload, ответ и Function Logs недоступны. Тесты
 проверяют локальную валидацию и тестовый repository; реальных записей не создают.
+
+Подробная диагностика серверных 503 и шаги проверки Production Vercel:
+[server/README.md](../../server/README.md). Новых переменных для логирования нет.
