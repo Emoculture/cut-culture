@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { ArrowUpRight, X } from 'lucide-react'
 import type { useCatalog } from '../integrations/catalog'
+import { bookingResponseError } from '../integrations/booking-errors'
+import { InvalidInput, validateInput } from '../integrations/booking-validation'
 import { bookingInterval, SALON_TIME_ZONE } from '../integrations/booking'
 export default function BookingDialog({ open, onClose, catalog }: { open: boolean; onClose: () => void; catalog: ReturnType<typeof useCatalog> }) {
   const ref = useRef<HTMLDialogElement>(null)
@@ -18,19 +20,21 @@ export default function BookingDialog({ open, onClose, catalog }: { open: boolea
   async function submit(event: FormEvent) {
     event.preventDefault()
     if (inFlight.current || !interval || !ready) return
+    let payload
+    try { payload = validateInput({ barber_id: barberId, service_id: serviceId, starts_at: interval.starts_at, client_name: clientName, client_phone: clientPhone }) }
+    catch (error) { setError(error instanceof InvalidInput ? error.message : 'Проверьте данные формы.'); return }
     inFlight.current = true; setSending(true); setError('')
     try {
       const response = await fetch('/api/bookings', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ barber_id: barberId, service_id: serviceId, starts_at: interval.starts_at, client_name: clientName, client_phone: clientPhone }),
+        body: JSON.stringify(payload),
         signal: AbortSignal.timeout(20000),
       })
-      const result = await response.json()
-      if (response.status === 201 && result.saved === true) {
+      const result = await response.json().catch(() => null)
+      if (response.status === 201 && result?.saved === true) {
         setSaved(true); setClientName(''); setClientPhone('')
       } else {
-        const messages: Record<number, string> = { 400: 'Проверьте данные, дату и рабочие часы 10:00–22:00 по Москве (не далее 180 дней).', 409: 'Это время уже занято. Выберите другое.', 429: 'Слишком много попыток. Повторите через 10 минут.' }
-        setError(messages[response.status] ?? 'Сохранение не подтверждено. Не повторяйте запрос автоматически; уточните запись у салона.')
+        setError(bookingResponseError(response.status, result))
       }
     } catch { setError('Не удалось получить подтверждение. Запись могла сохраниться. Уточните её у салона перед повторной отправкой.') }
     finally { inFlight.current = false; setSending(false) }
@@ -54,7 +58,7 @@ export default function BookingDialog({ open, onClose, catalog }: { open: boolea
         <label>Ваше имя<input required autoComplete="name" minLength={2} maxLength={100} value={clientName} onChange={e => setClientName(e.target.value)}/></label>
         <label>Телефон<input type="tel" required autoComplete="tel" placeholder="+7 999 123-45-67" minLength={10} maxLength={30} value={clientPhone} onChange={e => setClientPhone(e.target.value)}/></label></fieldset>
         <p>Часовой пояс: {SALON_TIME_ZONE}. Работаем 10:00–22:00.</p>
-        <div aria-live="polite">{date && time && service && (interval ? <p>Окончание: {new Intl.DateTimeFormat('ru-RU', { timeZone: SALON_TIME_ZONE, hour: '2-digit', minute: '2-digit' }).format(new Date(interval.ends_at))}. Доступность этого времени ещё не проверена.</p> : <p>Выберите будущее время так, чтобы услуга завершилась до 22:00.</p>)}</div>
+        <div aria-live="polite">{date && time && service && (interval ? <p>Окончание: {new Intl.DateTimeFormat('ru-RU', { timeZone: SALON_TIME_ZONE, hour: '2-digit', minute: '2-digit' }).format(new Date(interval.ends_at))}. Доступность этого времени ещё не проверена.</p> : <p>Выберите время в пределах 180 дней так, чтобы услуга полностью прошла с 10:00 до 22:00 по Москве.</p>)}</div>
         {error && <p role="alert">{error}</p>}
         <button type="submit" className="button" disabled={!ready || sending}>{sending ? 'Сохраняем запись…' : 'Подтвердить запись'}</button>
       </form>}

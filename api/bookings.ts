@@ -1,6 +1,7 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node'
 import { createClient } from '@supabase/supabase-js'
-import { createHmac } from 'node:crypto'
+import { logBookingRejection } from '../server/diagnostics.js'
+import { createHmac, randomUUID } from 'node:crypto'
 import { handleBooking } from '../server/bookings.js'
 import type { Dependencies } from '../server/bookings.js'
 
@@ -47,6 +48,8 @@ function dependencies(): Dependencies {
   }
 }
 export default async function handler(req: VercelRequest, res: VercelResponse) {
+  const requestId = randomUUID()
+  res.setHeader('X-Request-ID', requestId)
   res.setHeader('Cache-Control', 'no-store')
   res.setHeader('X-Content-Type-Options', 'nosniff')
   if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); return res.status(405).json({ error: 'Разрешён только POST.' }) }
@@ -56,7 +59,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const forwarded = req.headers['x-forwarded-for']
     const ip = (Array.isArray(forwarded) ? forwarded[0] : forwarded)?.split(',')[0].trim()
     if (!ip) return res.status(503).json({ error: 'Сервис временно недоступен.' })
-    const result = await handleBooking({ method: req.method, origin: typeof req.headers.origin === 'string' ? req.headers.origin : undefined, contentType: req.headers['content-type'], body: req.body, ip }, dependencies())
+    const result = await handleBooking({ method: req.method, origin: typeof req.headers.origin === 'string' ? req.headers.origin : undefined, contentType: req.headers['content-type'], body: req.body, ip }, { ...dependencies(), reportInvalid: code => logBookingRejection(code, requestId) })
     if (result.status === 429) res.setHeader('Retry-After', '600')
     return res.status(result.status).json(result.body)
   } catch {
