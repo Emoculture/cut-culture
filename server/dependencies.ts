@@ -1,3 +1,4 @@
+import { createTelegramNotifier } from './telegram.js'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { createClient } from '@supabase/supabase-js'
 import { createHmac } from 'node:crypto'
@@ -49,11 +50,19 @@ export function createDependencies(env: NodeJS.ProcessEnv, fetchImpl: typeof fet
       // New API keys are opaque, not JWTs. The installed SDK also adds a Bearer
       // fallback for REST; remove only that duplicate, keeping apikey intact.
       if (key.startsWith('sb_secret_') && headers.get('Authorization') === `Bearer ${key}`) headers.delete('Authorization')
-      return fetchImpl(url, { ...init, headers, signal: AbortSignal.timeout(8000) })
+      return fetchImpl(url, { ...init, headers, signal: init?.signal ? AbortSignal.any([init.signal, AbortSignal.timeout(8000)]) : AbortSignal.timeout(8000) })
     } } })
   } catch { throw new BookingFailure('SUPABASE_CLIENT_INIT_FAILED') }
   return {
     origin,
+    notifySaved: createTelegramNotifier(env, async (row, signal) => {
+      const [barber, service] = await Promise.all([
+        db.from('barbers').select('name').eq('id', row.barber_id).abortSignal(signal).maybeSingle(),
+        db.from('services').select('name').eq('id', row.service_id).abortSignal(signal).maybeSingle(),
+      ])
+      if (barber.error || service.error || !barber.data || !service.data || typeof barber.data.name !== 'string' || typeof service.data.name !== 'string') throw new Error('Notification catalog unavailable')
+      return { barber_name: barber.data.name, service_name: service.data.name }
+    }, fetchImpl),
     async limit(ip) {
       const hash = createHmac('sha256', redisToken).update(ip).digest('hex')
       let response: Response

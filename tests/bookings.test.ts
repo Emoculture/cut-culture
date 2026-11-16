@@ -53,10 +53,12 @@ test('method, origin, content type, body size, rate limit and missing catalog bl
   }
 })
 test('concurrent conflicting insert is reported as conflict, not success', async () => {
-  const { deps, request } = fixture(); let occupied = false
+  const { deps, request } = fixture(); let occupied = false; let notifications = 0
+  deps.notifySaved = async () => { notifications++ }
   deps.repository.insert = async () => { if (occupied) return { error: { code: '23P01' } }; occupied = true; return { error: null } }
   const results = await Promise.all([handleBooking(request, deps), handleBooking(request, deps)])
   assert.deepEqual(results.map(r => r.status).sort(), [201, 409])
+  assert.equal(notifications, 1)
 })
 
 test('common Russian phone formats and pasted spaces/dashes normalize identically', () => {
@@ -311,4 +313,114 @@ test('installed SDK completes protected server flow with new key and preserves R
   const { request } = fixture(); request.origin = testServerEnv.BOOKING_ALLOWED_ORIGIN
   const response = await handleBooking(request, deps)
   assert.equal(response.status, 201); assert.ok(redisChecked); assert.ok(inserted)
+})
+
+const telegramEnv = { TELEGRAM_BOT_TOKEN: '123456:FAKE_TEST_TOKEN', TELEGRAM_OWNER_CHAT_ID: '123456789' }
+const notificationNames = { barber_name: 'Проверенный мастер', service_name: 'Проверенная услуга' }
+
+test('Telegram sendMessage includes booking details and Moscow time as plain text', async () => {
+  const { createTelegramNotifier } = await import('../server/telegram.js')
+  let sends = 0
+  const notify = createTelegramNotifier(telegramEnv, async () => notificationNames, async (url, init) => {
+    assert.equal(String(url), `https://api.telegram.org/bot${telegramEnv.TELEGRAM_BOT_TOKEN}/sendMessage`)
+    assert.equal(init?.method, 'POST'); assert.equal(init?.redirect, 'error')
+    assert.ok(init?.signal); const body = JSON.parse(String(init?.body))
+    assert.equal(body.chat_id, telegramEnv.TELEGRAM_OWNER_CHAT_ID)
+    for (const text of ['Иван', notificationNames.barber_name, notificationNames.service_name, '17.11.2026', '10:00–11:00', '+79991234567', 'Москва']) assert.ok(body.text.includes(text))
+    assert.equal(body.parse_mode, undefined); assert.deepEqual(body.link_preview_options, { is_disabled: true })
+    sends++; return Response.json({ ok: true, result: { message_id: 1 } })
+  })
+  await notify({ ...validateInput(input), ends_at: '2026-11-17T08:00:00Z', status: 'confirmed' })
+  assert.equal(sends, 1)
+})
+
+test('Telegram missing or invalid configuration performs no lookup or network request', async () => {
+  const { createTelegramNotifier, NotificationFailure } = await import('../server/telegram.js')
+  for (const env of [{}, { TELEGRAM_BOT_TOKEN: telegramEnv.TELEGRAM_BOT_TOKEN }, { TELEGRAM_OWNER_CHAT_ID: telegramEnv.TELEGRAM_OWNER_CHAT_ID }, { ...telegramEnv, TELEGRAM_BOT_TOKEN: 'INVALID' }]) {
+    const notify = createTelegramNotifier(env, async () => { assert.fail('unexpected lookup') }, async () => { assert.fail('unexpected request') })
+    await assert.rejects(notify({ ...input, ends_at: '2026-11-17T08:00:00Z', status: 'confirmed' }), error => error instanceof NotificationFailure && ['TELEGRAM_CONFIG_MISSING', 'TELEGRAM_CONFIG_INVALID'].includes(error.code))
+  }
+})
+
+test('Telegram errors are fixed safe categories without response or exception details', async () => {
+  const { createTelegramNotifier, NotificationFailure } = await import('../server/telegram.js')
+  const cases: [() => Promise<Response>, string][] = [
+    [async () => new Response('PRIVATE response', { status: 500 }), 'TELEGRAM_HTTP_FAILED'],
+    [async () => { throw new TypeError('PRIVATE token/url') }, 'TELEGRAM_NETWORK_FAILED'],
+    [async () => { throw new DOMException('PRIVATE', 'TimeoutError') }, 'TELEGRAM_TIMEOUT'],
+    [async () => new Response('PRIVATE'), 'TELEGRAM_RESPONSE_INVALID'],
+    [async () => Response.json({ result: 'PRIVATE' }), 'TELEGRAM_RESPONSE_INVALID'],
+    [async () => Response.json({ ok: false, description: 'PRIVATE' }), 'TELEGRAM_REJECTED'],
+  ]
+  const row: BookingRow = { ...input, ends_at: '2026-11-17T08:00:00Z', status: 'confirmed' }
+  for (const [fetchMock, code] of cases) {
+    await assert.rejects(createTelegramNotifier(telegramEnv, async () => notificationNames, fetchMock)(row), error => error instanceof NotificationFailure && error.code === code && !error.message.includes('PRIVATE'))
+  }
+  let sent = false
+  await assert.rejects(createTelegramNotifier(telegramEnv, async () => { throw new Error('PRIVATE database') }, async () => { sent = true; return Response.json({ ok: true }) })(row), error => error instanceof NotificationFailure && error.code === 'TELEGRAM_CATALOG_FAILED')
+  assert.equal(sent, false)
+})
+
+test('notification runs after confirmed insert; failure and missing configuration keep 201', async () => {
+  const { createTelegramNotifier, NotificationFailure } = await import('../server/telegram.js')
+  for (const scenario of ['success', 'failure', 'missing', 'unexpected', 'loggingFailure']) {
+    const { deps, request, rows } = fixture(); const events: string[] = []
+    deps.notifySaved = async row => {
+      assert.equal(rows.length, 1); assert.equal(rows[0], row); assert.equal(row.status, 'confirmed')
+      if (scenario === 'missing') return createTelegramNotifier({}, async () => notificationNames)(row)
+      if (scenario === 'unexpected') throw new Error('PRIVATE')
+      if (scenario !== 'success') throw new NotificationFailure('TELEGRAM_HTTP_FAILED')
+    }
+    deps.reportNotification = code => { events.push(code); if (scenario === 'loggingFailure') throw new Error('PRIVATE log error') }
+    const result = await handleBooking(request, deps)
+    assert.deepEqual(result, { status: 201, body: { saved: true } }); assert.equal(rows.length, 1)
+    assert.deepEqual(events, scenario === 'success' ? [] : [scenario === 'missing' ? 'TELEGRAM_CONFIG_MISSING' : scenario === 'unexpected' ? 'TELEGRAM_UNEXPECTED_FAILURE' : 'TELEGRAM_HTTP_FAILED'])
+  }
+})
+
+test('notification is never sent for failed or conflicting booking requests', async () => {
+  for (const scenario of ['conflict', 'insertError', 'insertThrow', 'validation', 'rate', 'origin']) {
+    const { deps, request } = fixture(); let sent = 0
+    deps.notifySaved = async () => { sent++ }
+    if (scenario === 'conflict') deps.repository.insert = async () => ({ error: { code: '23P01' } })
+    if (scenario === 'insertError') deps.repository.insert = async () => ({ error: { code: '42501' } })
+    if (scenario === 'insertThrow') deps.repository.insert = async () => { throw new Error('PRIVATE') }
+    if (scenario === 'validation') request.body = { ...input, client_phone: 'invalid' }
+    if (scenario === 'rate') deps.limit = async () => false
+    if (scenario === 'origin') request.origin = 'https://invalid.example'
+    assert.notEqual((await handleBooking(request, deps)).status, 201); assert.equal(sent, 0)
+  }
+})
+
+test('production adapter gets names from Supabase only after insert and before Telegram', async () => {
+  const { createDependencies } = await import('../server/dependencies.js')
+  const sequence: string[] = []
+  const deps = createDependencies({ ...testServerEnv, ...telegramEnv }, async (url, init) => {
+    const parsed = new URL(String(url))
+    if (String(url) === testServerEnv.UPSTASH_REDIS_REST_URL) return Response.json({ result: 1 })
+    if (parsed.hostname === 'api.telegram.org') {
+      sequence.push('telegram'); const text = JSON.parse(String(init?.body)).text
+      assert.ok(text.includes(notificationNames.barber_name)); assert.ok(text.includes(notificationNames.service_name))
+      assert.deepEqual(sequence, ['insert', 'name', 'name', 'telegram'])
+      return Response.json({ ok: true })
+    }
+    if (init?.method === 'POST') { sequence.push('insert'); return new Response(null, { status: 201 }) }
+    if (parsed.searchParams.get('select') === 'name') {
+      assert.equal(sequence[0], 'insert'); sequence.push('name')
+      return Response.json([{ name: parsed.pathname.endsWith('barbers') ? notificationNames.barber_name : notificationNames.service_name }])
+    }
+    return Response.json(parsed.pathname.endsWith('barbers') ? [{ id: 1 }] : [{ duration_minutes: 60 }])
+  })
+  deps.now = () => now
+  const { request } = fixture(); request.origin = testServerEnv.BOOKING_ALLOWED_ORIGIN
+  assert.equal((await handleBooking(request, deps)).status, 201)
+  assert.equal(sequence.at(-1), 'telegram')
+})
+
+test('notification diagnostics log only allowlisted code and request ID', async t => {
+  const { logNotificationFailure } = await import('../server/diagnostics.js')
+  const logs: string[] = []; t.mock.method(console, 'warn', (message: string) => { logs.push(message) })
+  const requestId = '01234567-89ab-4def-8123-456789abcdef'
+  logNotificationFailure('TELEGRAM_NETWORK_FAILED', requestId)
+  assert.deepEqual(logs.map(text => JSON.parse(text)), [{ event: 'booking_notification_failed', code: 'TELEGRAM_NETWORK_FAILED', request_id: requestId }])
 })

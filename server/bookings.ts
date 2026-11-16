@@ -1,3 +1,5 @@
+import { NotificationFailure, notificationCodes } from './telegram.js'
+import type { NotificationCode } from './telegram.js'
 import { BookingFailure, failureCode } from './failures.js'
 import type { FailureCode, FailureDetails } from './failures.js'
 import { InvalidInput, validateInput } from '../src/integrations/booking-validation.js'
@@ -15,6 +17,8 @@ export interface Dependencies {
   limit(ip: string): Promise<boolean>
   repository: Repository
   now?: () => number
+  notifySaved?: (row: BookingRow) => Promise<void>
+  reportNotification?: (code: NotificationCode) => void
   reportFailure?: (code: FailureCode, details?: FailureDetails) => void
   reportInvalid?: (code: BookingErrorCode) => void
 }
@@ -46,9 +50,17 @@ export async function handleBooking(request: { method?: string; origin?: string;
     if (duration === null) throw new InvalidInput('SERVICE_UNAVAILABLE')
     const ends_at = calculateEnd(input.starts_at, duration, (deps.now ?? Date.now)())
     fallback = 'SUPABASE_INSERT_UNEXPECTED_FAILURE'
-    const result = await deps.repository.insert({ ...input, ends_at, status: 'confirmed' })
+    const row: BookingRow = { ...input, ends_at, status: 'confirmed' }
+    const result = await deps.repository.insert(row)
     if (result.error?.code === '23P01') return reply(409, 'Это время уже занято. Выберите другое.')
     if (result.error) throw new BookingFailure('SUPABASE_INSERT_FAILED')
+    try {
+      await deps.notifySaved?.(row)
+    } catch (error) {
+      const code = error instanceof NotificationFailure && notificationCodes.includes(error.code) ? error.code : 'TELEGRAM_UNEXPECTED_FAILURE'
+      // Neither notification nor logging failures can turn a saved booking into 503.
+      try { deps.reportNotification?.(code) } catch { /* preserve confirmed save */ }
+    }
     return { status: 201, body: { saved: true } }
   } catch (error) {
     if (error instanceof InvalidInput) {

@@ -1,7 +1,7 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node'
 import { createDependencies } from '../server/dependencies.js'
 import { failureCode } from '../server/failures.js'
-import { logBookingFailure, logBookingRejection } from '../server/diagnostics.js'
+import { logBookingFailure, logBookingRejection, logNotificationFailure } from '../server/diagnostics.js'
 import { randomUUID } from 'node:crypto'
 import type { Dependencies } from '../server/bookings.js'
 import { handleBooking } from '../server/bookings.js'
@@ -22,7 +22,7 @@ export function createBookingHandler(makeDependencies: () => Dependencies = () =
         logBookingFailure('FORWARDED_IP_MISSING', requestId)
         return res.status(503).json({ error: 'Сервис временно недоступен.', code: 'FORWARDED_IP_MISSING' })
       }
-      const result = await handleBooking({ method: req.method, origin: typeof req.headers.origin === 'string' ? req.headers.origin : undefined, contentType: req.headers['content-type'], body: req.body, ip }, { ...makeDependencies(), reportInvalid: code => logBookingRejection(code, requestId), reportFailure: (code, details) => logBookingFailure(code, requestId, details) })
+      const result = await handleBooking({ method: req.method, origin: typeof req.headers.origin === 'string' ? req.headers.origin : undefined, contentType: req.headers['content-type'], body: req.body, ip }, { ...makeDependencies(), reportNotification: code => logNotificationFailure(code, requestId), reportInvalid: code => logBookingRejection(code, requestId), reportFailure: (code, details) => logBookingFailure(code, requestId, details) })
       if (result.status === 429) res.setHeader('Retry-After', '600')
       return res.status(result.status).json(result.body)
     } catch (error) {

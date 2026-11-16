@@ -28,7 +28,7 @@ export default function BookingDialog({ open, onClose, catalog }: { open: boolea
       const response = await fetch('/api/bookings', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(20000),
+        signal: AbortSignal.timeout(28000),
       })
       const result = await response.json().catch(() => null)
       if (response.status === 201 && result?.saved === true) {
