@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "tsc -b && vite build",
-    "preview": "vite preview --host 0.0.0.0"
+    "preview": "vite preview --host 0.0.0.0",
+    "test": "node --import tsx tests/bookings.test.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.119.0",
@@ -15,9 +16,12 @@
     "react-dom": "^19.2.0"
   },
   "devDependencies": {
+    "@types/node": "^26.6.6",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
+    "@vercel/node": "^31.0.0",
     "@vitejs/plugin-react": "^5.1.0",
+    "tsx": "^4.23.15",
     "typescript": "~5.9.3",
     "vite": "^7.2.0"
   }
