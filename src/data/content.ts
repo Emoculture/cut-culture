@@ -4,6 +4,13 @@ export const services: Service[] = [
   { number: '02', name: 'Стрижка машинкой', description: 'Минимум длины. Максимум характера.', duration: '30 мин', price: '1 500 ₽' },
   { number: '03', name: 'Борода и усы', description: 'Чёткие линии, правильная форма и уход.', duration: '40 мин', price: '1 500 ₽' },
   { number: '04', name: 'Стрижка + борода', description: 'Полный образ. Всё внимание — деталям.', duration: '90 мин', price: '3 500 ₽' },
+{
+  number: '05',
+  name: 'Укладка волос',
+  description: 'Стильная укладка на каждый день.',
+  duration: '30 мин',
+  price: '1 000 ₽'
+}
 ]
 export const barbers: Barber[] = [
   { name: 'Александр', role: 'ТОП-БАРБЕР', specialty: 'Классика. Текстура. Точность.', image: 'master-1' },
