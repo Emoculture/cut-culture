@@ -11,7 +11,7 @@ function request(body: unknown = update(), secret: unknown = env.TELEGRAM_WEBHOO
 }
 async function invoke(req: unknown, deps: TodayDependencies, config = env) {
   const headers: Record<string, unknown> = {}; let status = 0; let body: unknown; let initialized = 0
-  const handler = createTelegramWebhook(config, () => { initialized++; return deps }, () => Date.parse('2026-11-16T21:05:00Z'))
+  const handler = createTelegramWebhook(config, () => { initialized++; return { claimUpdate: async () => true, ...deps } }, () => Date.parse('2026-11-16T21:05:00Z'))
   const res = { setHeader: (key: string, value: unknown) => { headers[key] = value }, status: (value: number) => { status = value; return res }, json: (value: unknown) => { body = value; return res } }
   await handler(req as Parameters<typeof handler>[0], res as unknown as Parameters<typeof handler>[1])
   return { status, body, headers, initialized }

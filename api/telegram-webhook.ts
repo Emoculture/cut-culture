@@ -18,7 +18,11 @@ export function createTelegramWebhook(env: NodeJS.ProcessEnv = process.env, make
       // Authenticate sender AND destination before initializing DB or sending data.
       const action = ownerBotAction(req.body, config.chatId)
       if (!action) return res.status(200).json({ ok: true })
-      await processOwnerAction(action, makeDependencies(config), now())
+      const deps = makeDependencies(config)
+      const updateId = (req.body as { update_id: number }).update_id
+      if (!deps.claimUpdate) throw new TodayFailure('BOT_DEDUP_FAILED')
+      if (!await deps.claimUpdate(updateId)) return res.status(200).json({ ok: true })
+      await processOwnerAction(action, deps, now())
       return res.status(200).json({ ok: true })
     } catch (error) {
       const code = error instanceof TodayFailure && webhookCodes.includes(error.code) ? error.code : 'TODAY_UNEXPECTED_FAILURE'
