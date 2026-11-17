@@ -1,10 +1,11 @@
+import type { BookingCard, BookingTickets, CancelOutcome } from './telegram-booking-actions.js'
 import { createHash, timingSafeEqual } from 'node:crypto'
 
 // Keep these in sync with the booking system and owner notifications.
 export const TODAY_TIME_ZONE = 'Europe/Moscow'
 export const TODAY_UTC_OFFSET_MINUTES = 180
 export const TODAY_LIMIT = 200
-export const webhookCodes = ['WEBHOOK_CONFIG_INVALID', 'TODAY_QUERY_FAILED', 'TODAY_SEND_FAILED', 'BOT_CALLBACK_FAILED', 'BOT_DEDUP_FAILED', 'TODAY_UNEXPECTED_FAILURE'] as const
+export const webhookCodes = ['WEBHOOK_CONFIG_INVALID', 'TODAY_QUERY_FAILED', 'TODAY_SEND_FAILED', 'BOT_CALLBACK_FAILED', 'BOT_DEDUP_FAILED', 'BOT_ACTION_FAILED', 'BOT_CANCEL_FAILED', 'TODAY_UNEXPECTED_FAILURE'] as const
 export type WebhookCode = typeof webhookCodes[number]
 export class TodayFailure extends Error {
   constructor(public readonly code: WebhookCode) { super(code) }
@@ -26,7 +27,7 @@ function object(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
 }
 export type ScheduleDay = 'today' | 'tomorrow'
-export interface OwnerBotAction { command: ScheduleDay | 'menu' | 'bookings' | 'ignore'; callbackId?: string; page?: number }
+export interface OwnerBotAction { command: ScheduleDay | 'menu' | 'bookings' | 'booking' | 'ignore'; callbackId?: string; page?: number; bookingStep?: 'view' | 'ask' | 'confirm' | 'reject'; actionToken?: string }
 function isOwnerPrivateChat(chat: Record<string, unknown> | null, from: Record<string, unknown> | null, ownerId: string) {
   return chat?.type === 'private' && typeof chat.id === 'number' && Number.isSafeInteger(chat.id) && String(chat.id) === ownerId
     && typeof from?.id === 'number' && Number.isSafeInteger(from.id) && String(from.id) === ownerId && from.is_bot === false
@@ -39,6 +40,8 @@ export function ownerBotAction(body: unknown, ownerId: string): OwnerBotAction |
     const message = object(callback.message)
     if (!isOwnerPrivateChat(object(message?.chat), object(callback.from), ownerId)
       || typeof callback.id !== 'string' || !callback.id.length || callback.id.length > 256) return null
+    const booking = typeof callback.data === 'string' ? /^booking:(view|ask|confirm|reject):([A-Za-z0-9_-]{22})$/.exec(callback.data) : null
+    if (booking) return { command: 'booking', callbackId: callback.id, bookingStep: booking[1] as 'view' | 'ask' | 'confirm' | 'reject', actionToken: booking[2] }
     const page = typeof callback.data === 'string' ? /^bookings:page:(0|[1-9]\d{0,3})$/.exec(callback.data) : null
     if (page) return { command: 'bookings', callbackId: callback.id, page: Number(page[1]) }
     if (callback.data === 'bookings:open') return { command: 'bookings', callbackId: callback.id, page: 0 }
@@ -65,7 +68,7 @@ export function dayRange(now: number, day: ScheduleDay) {
   return { start: new Date(start).toISOString(), end: new Date(start + 86400000).toISOString(), label: date.split('-').reverse().join('.') }
 }
 export function todayRange(now: number) { return dayRange(now, 'today') }
-export interface TodayBooking { starts_at: string; ends_at: string; client_name: string; barber_name: string; service_name: string }
+export interface TodayBooking { booking_id?: string; starts_at: string; ends_at: string; client_name: string; barber_name: string; service_name: string }
 const clean = (value: string) => value.replace(/[\p{Cc}\p{Cf}]/gu, ' ').slice(0, 60)
 export function scheduleMessages(rows: TodayBooking[], label: string, truncated = false, day: ScheduleDay = 'today') {
   const heading = `Записи на ${label} (Москва)\n`
@@ -88,6 +91,10 @@ export interface TodayDependencies {
   send(messages: string[], keyboard?: InlineKeyboard): Promise<void>
   acknowledge?(callbackId: string): Promise<void>
   claimUpdate?(updateId: number): Promise<boolean>
+  tickets?: BookingTickets
+  getBooking?(id: string): Promise<BookingCard | null>
+  cancelBooking?(id: string): Promise<CancelOutcome>
+  reportCancellationFailure?(): void
 }
 export async function processSchedule(body: unknown, ownerId: string, deps: TodayDependencies, now = Date.now()) {
   const day = ownerScheduleCommand(body, ownerId)

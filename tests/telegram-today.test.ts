@@ -82,7 +82,7 @@ test('Supabase query filters confirmed bookings to half-open day and never selec
     assert.equal(new Headers(init?.headers).get('apikey'), env.SUPABASE_SECRET_KEY)
     if (parsed.pathname.endsWith('bookings')) {
       bookingsRead = true
-      assert.equal(parsed.searchParams.get('select'), 'starts_at,ends_at,client_name,barber_id,service_id')
+      assert.equal(parsed.searchParams.get('select'), 'id,starts_at,ends_at,client_name,barber_id,service_id')
       assert.equal(parsed.searchParams.get('status'), 'eq.confirmed')
       assert.deepEqual(parsed.searchParams.getAll('starts_at'), ['gte.2026-11-16T21:00:00.000Z', 'lt.2026-11-17T21:00:00.000Z'])
       assert.equal(parsed.searchParams.get('order'), 'starts_at.asc')

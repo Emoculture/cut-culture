@@ -1,3 +1,4 @@
+import { bookingTickets, validBookingId } from './telegram-booking-actions.js'
 import { updateGuard } from './telegram-update-guard.js'
 import { createClient } from '@supabase/supabase-js'
 import { TodayFailure, TODAY_LIMIT } from './telegram-today.js'
@@ -26,6 +27,31 @@ export function todayDependencies(env: NodeJS.ProcessEnv, config: { token: strin
     } catch { throw new TodayFailure(code) }
   }
   return {
+    tickets: bookingTickets(env, config.token, config.chatId, fetchImpl),
+    async getBooking(id) {
+      try {
+        if (!validBookingId(id)) throw new Error()
+        const db = database()
+        const { data, error } = await db.from('bookings').select('id,status,starts_at,ends_at,client_name,barber_id,service_id').eq('id', id).maybeSingle()
+        if (error) throw new Error()
+        if (!data) return null
+        const [barber, service] = await Promise.all([db.from('barbers').select('name').eq('id', data.barber_id).maybeSingle(), db.from('services').select('name').eq('id', data.service_id).maybeSingle()])
+        if (barber.error || service.error || typeof data.client_name !== 'string' || typeof data.status !== 'string' || !Number.isFinite(Date.parse(data.starts_at)) || !Number.isFinite(Date.parse(data.ends_at))) throw new Error()
+        return { booking_id: id, status: data.status, starts_at: data.starts_at, ends_at: data.ends_at, client_name: data.client_name, barber_name: String(barber.data?.name ?? 'Мастер недоступен'), service_name: String(service.data?.name ?? 'Услуга недоступна') }
+      } catch { throw new TodayFailure('TODAY_QUERY_FAILED') }
+    },
+    async cancelBooking(id) {
+      try {
+        if (!validBookingId(id)) throw new Error()
+        const db = database()
+        const { data, error } = await db.from('bookings').update({ status: 'cancelled' }).eq('id', id).eq('status', 'confirmed').select('id,status').maybeSingle()
+        if (error) throw new Error()
+        if (data) { if (data.status !== 'cancelled' || String(data.id) !== id) throw new Error(); return 'cancelled' }
+        const current = await db.from('bookings').select('status').eq('id', id).maybeSingle()
+        if (current.error) throw new Error()
+        return !current.data ? 'not_found' : current.data.status === 'cancelled' ? 'already_cancelled' : 'not_active'
+      } catch { throw new TodayFailure('BOT_CANCEL_FAILED') }
+    },
     claimUpdate: updateGuard(env, config.token, fetchImpl),
     async load(start, end, pagination) {
       try {
@@ -33,7 +59,7 @@ export function todayDependencies(env: NodeJS.ProcessEnv, config: { token: strin
         // Explicit projection excludes phone numbers. No public booking policies.
         const limit = pagination?.limit ?? TODAY_LIMIT
         if (pagination && (!Number.isSafeInteger(pagination.offset) || pagination.offset < 0 || pagination.offset > 99990 || limit !== 10)) throw new Error()
-        let query = db.from('bookings').select('starts_at,ends_at,client_name,barber_id,service_id').eq('status', 'confirmed').gte('starts_at', start).lt('starts_at', end).order('starts_at')
+        let query = db.from('bookings').select('id,starts_at,ends_at,client_name,barber_id,service_id').eq('status', 'confirmed').gte('starts_at', start).lt('starts_at', end).order('starts_at')
         query = pagination ? query.order('id').range(pagination.offset, pagination.offset + limit) : query.limit(limit + 1)
         const { data, error } = await query
         if (error || !data) throw new Error()
@@ -52,7 +78,9 @@ export function todayDependencies(env: NodeJS.ProcessEnv, config: { token: strin
         const serviceNames = new Map((services.data ?? []).map(s => [String(s.id), s.name]))
         return { rows: rows.map(row => {
           if (typeof row.client_name !== 'string' || !Number.isFinite(Date.parse(row.starts_at)) || !Number.isFinite(Date.parse(row.ends_at)) || Date.parse(row.ends_at) <= Date.parse(row.starts_at)) throw new Error()
-          return { starts_at: row.starts_at, ends_at: row.ends_at, client_name: row.client_name, barber_name: String(barberNames.get(String(row.barber_id)) ?? 'Мастер недоступен'), service_name: String(serviceNames.get(String(row.service_id)) ?? 'Услуга недоступна') }
+          const bookingId = row.id === undefined ? undefined : String(row.id)
+          if (pagination && (!validBookingId(bookingId) || (typeof row.id === 'number' && !Number.isSafeInteger(row.id)))) throw new Error()
+          return { ...(bookingId ? { booking_id: bookingId } : {}), starts_at: row.starts_at, ends_at: row.ends_at, client_name: row.client_name, barber_name: String(barberNames.get(String(row.barber_id)) ?? 'Мастер недоступен'), service_name: String(serviceNames.get(String(row.service_id)) ?? 'Услуга недоступна') }
         }), truncated: data.length > limit }
       } catch { throw new TodayFailure('TODAY_QUERY_FAILED') }
     },

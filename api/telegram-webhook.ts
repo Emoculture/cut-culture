@@ -22,7 +22,9 @@ export function createTelegramWebhook(env: NodeJS.ProcessEnv = process.env, make
       const updateId = (req.body as { update_id: number }).update_id
       if (!deps.claimUpdate) throw new TodayFailure('BOT_DEDUP_FAILED')
       if (!await deps.claimUpdate(updateId)) return res.status(200).json({ ok: true })
-      await processOwnerAction(action, deps, now())
+      await processOwnerAction(action, { ...deps, reportCancellationFailure: () => {
+        console.warn(JSON.stringify({ event: 'booking_cancellation_unconfirmed', code: 'BOT_CANCEL_FAILED', request_id: requestId }))
+      } }, now())
       return res.status(200).json({ ok: true })
     } catch (error) {
       const code = error instanceof TodayFailure && webhookCodes.includes(error.code) ? error.code : 'TODAY_UNEXPECTED_FAILURE'

@@ -84,7 +84,7 @@ test('Supabase page uses confirmed filter, stable ordering, offset and one looka
       assert.equal(parsed.searchParams.get('offset'), '10'); assert.equal(parsed.searchParams.get('limit'), '11')
       assert.deepEqual(parsed.searchParams.getAll('starts_at'), ['gte.2026-11-16T21:00:00.000Z', 'lt.2026-11-23T21:00:00.000Z'])
       assert.ok(!parsed.searchParams.get('select')!.includes('phone'))
-      return Response.json(Array.from({ length: 11 }, () => ({ ...row(), barber_id: 1, service_id: 2 })))
+      return Response.json(Array.from({ length: 11 }, () => ({ ...row(), id: 1, barber_id: 1, service_id: 2 })))
     }
     return Response.json([{ id: parsed.pathname.endsWith('/barbers') ? 1 : 2, name: 'Название из базы' }])
   })

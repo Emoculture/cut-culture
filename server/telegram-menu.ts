@@ -1,3 +1,4 @@
+import { processBookingAction } from './telegram-booking-actions.js'
 import { sendBookings } from './telegram-bookings.js'
 import { sendSchedule, TodayFailure } from './telegram-today.js'
 import type { InlineKeyboard, OwnerBotAction, TodayDependencies } from './telegram-today.js'
@@ -15,6 +16,10 @@ export async function processOwnerAction(action: OwnerBotAction, deps: TodayDepe
   if (action.command === 'ignore') return
   if (action.command === 'menu') {
     await deps.send(['Здравствуйте! Это меню владельца CUT CULTURE.\nВыберите период для просмотра подтверждённых записей.'], mainMenu)
+    return
+  }
+  if (action.command === 'booking') {
+    await processBookingAction(action, deps, now)
     return
   }
   if (action.command === 'bookings') {
