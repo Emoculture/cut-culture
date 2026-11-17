@@ -15,7 +15,7 @@ export function todayDependencies(env: NodeJS.ProcessEnv, config: { token: strin
     async load(start, end) {
       try {
         // Explicit projection excludes phone numbers. No public booking policies.
-        const { data, error } = await db.from('bookings').select('starts_at,client_name,barber_id,service_id').eq('status', 'confirmed').gte('starts_at', start).lt('starts_at', end).order('starts_at').limit(TODAY_LIMIT + 1)
+        const { data, error } = await db.from('bookings').select('starts_at,ends_at,client_name,barber_id,service_id').eq('status', 'confirmed').gte('starts_at', start).lt('starts_at', end).order('starts_at').limit(TODAY_LIMIT + 1)
         if (error || !data) throw new Error()
         const rows = data.slice(0, TODAY_LIMIT)
         if (!rows.length) return { rows: [], truncated: false }
@@ -31,8 +31,8 @@ export function todayDependencies(env: NodeJS.ProcessEnv, config: { token: strin
         const barberNames = new Map((barbers.data ?? []).map(b => [String(b.id), b.name]))
         const serviceNames = new Map((services.data ?? []).map(s => [String(s.id), s.name]))
         return { rows: rows.map(row => {
-          if (typeof row.client_name !== 'string' || !Number.isFinite(Date.parse(row.starts_at))) throw new Error()
-          return { starts_at: row.starts_at, client_name: row.client_name, barber_name: String(barberNames.get(String(row.barber_id)) ?? 'Мастер недоступен'), service_name: String(serviceNames.get(String(row.service_id)) ?? 'Услуга недоступна') }
+          if (typeof row.client_name !== 'string' || !Number.isFinite(Date.parse(row.starts_at)) || !Number.isFinite(Date.parse(row.ends_at)) || Date.parse(row.ends_at) <= Date.parse(row.starts_at)) throw new Error()
+          return { starts_at: row.starts_at, ends_at: row.ends_at, client_name: row.client_name, barber_name: String(barberNames.get(String(row.barber_id)) ?? 'Мастер недоступен'), service_name: String(serviceNames.get(String(row.service_id)) ?? 'Услуга недоступна') }
         }), truncated: data.length > TODAY_LIMIT }
       } catch { throw new TodayFailure('TODAY_QUERY_FAILED') }
     },
