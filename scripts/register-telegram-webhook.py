@@ -22,7 +22,7 @@ def main():
         data=json.dumps({
             'url': WEBHOOK_URL,
             'secret_token': secret,
-            'allowed_updates': ['message'],
+            'allowed_updates': ['message', 'callback_query'],
             'max_connections': 1,
         }).encode('utf-8'),
         headers={'Content-Type': 'application/json'},

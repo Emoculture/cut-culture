@@ -1,19 +1,33 @@
 import { createClient } from '@supabase/supabase-js'
 import { TodayFailure, TODAY_LIMIT } from './telegram-today.js'
-import type { TodayDependencies } from './telegram-today.js'
+import type { TodayDependencies, WebhookCode } from './telegram-today.js'
 export function todayDependencies(env: NodeJS.ProcessEnv, config: { token: string; chatId: string }, fetchImpl: typeof fetch = fetch): TodayDependencies {
-  const url = env.SUPABASE_URL, key = env.SUPABASE_SECRET_KEY
-  if (!url || !key) throw new TodayFailure('WEBHOOK_CONFIG_INVALID')
-  try { if (new URL(url).protocol !== 'https:') throw new Error() } catch { throw new TodayFailure('WEBHOOK_CONFIG_INVALID') }
   const deadline = AbortSignal.timeout(25000)
-  const db = createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false }, global: { fetch: (input, init) => {
-    const headers = new Headers(init?.headers)
-    if (key.startsWith('sb_secret_') && headers.get('Authorization') === `Bearer ${key}`) headers.delete('Authorization')
-    return fetchImpl(input, { ...init, headers, signal: AbortSignal.any([deadline, AbortSignal.timeout(8000)]) })
-  } } })
+  // Menu and callback acknowledgement do not initialize Supabase or require reads.
+  function database() {
+    const url = env.SUPABASE_URL, key = env.SUPABASE_SECRET_KEY
+    if (!url || !key) throw new TodayFailure('WEBHOOK_CONFIG_INVALID')
+    try { if (new URL(url).protocol !== 'https:') throw new Error() } catch { throw new TodayFailure('WEBHOOK_CONFIG_INVALID') }
+    return createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false }, global: { fetch: (input, init) => {
+      const headers = new Headers(init?.headers)
+      if (key.startsWith('sb_secret_') && headers.get('Authorization') === `Bearer ${key}`) headers.delete('Authorization')
+      return fetchImpl(input, { ...init, headers, signal: AbortSignal.any([deadline, AbortSignal.timeout(8000)]) })
+    } } })
+  }
+  async function telegram(method: 'sendMessage' | 'answerCallbackQuery', payload: unknown, code: WebhookCode) {
+    try {
+      deadline.throwIfAborted()
+      const response = await fetchImpl(`https://api.telegram.org/bot${config.token}/${method}`, {
+        method: 'POST', redirect: 'error', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload), signal: AbortSignal.any([deadline, AbortSignal.timeout(4000)]),
+      })
+      if (!response.ok || (await response.json() as { ok?: unknown }).ok !== true) throw new Error()
+    } catch { throw new TodayFailure(code) }
+  }
   return {
     async load(start, end) {
       try {
+        const db = database()
         // Explicit projection excludes phone numbers. No public booking policies.
         const { data, error } = await db.from('bookings').select('starts_at,ends_at,client_name,barber_id,service_id').eq('status', 'confirmed').gte('starts_at', start).lt('starts_at', end).order('starts_at').limit(TODAY_LIMIT + 1)
         if (error || !data) throw new Error()
@@ -36,19 +50,17 @@ export function todayDependencies(env: NodeJS.ProcessEnv, config: { token: strin
         }), truncated: data.length > TODAY_LIMIT }
       } catch { throw new TodayFailure('TODAY_QUERY_FAILED') }
     },
-    async send(messages) {
-      try {
-        for (let i = 0; i < messages.length; i++) {
-          if (i) await new Promise<void>(resolve => setTimeout(resolve, 1100))
-          deadline.throwIfAborted()
-          const response = await fetchImpl(`https://api.telegram.org/bot${config.token}/sendMessage`, {
-            method: 'POST', redirect: 'error', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ chat_id: config.chatId, text: messages[i], link_preview_options: { is_disabled: true } }),
-            signal: AbortSignal.any([deadline, AbortSignal.timeout(4000)]),
-          })
-          if (!response.ok || (await response.json() as { ok?: unknown }).ok !== true) throw new Error()
-        }
-      } catch { throw new TodayFailure('TODAY_SEND_FAILED') }
+    async send(messages, keyboard) {
+      for (let i = 0; i < messages.length; i++) {
+        if (i) await new Promise<void>(resolve => setTimeout(resolve, 1100))
+        await telegram('sendMessage', {
+          chat_id: config.chatId, text: messages[i], link_preview_options: { is_disabled: true },
+          ...(keyboard && i === messages.length - 1 ? { reply_markup: keyboard } : {}),
+        }, 'TODAY_SEND_FAILED')
+      }
+    },
+    async acknowledge(callbackId) {
+      await telegram('answerCallbackQuery', { callback_query_id: callbackId }, 'BOT_CALLBACK_FAILED')
     },
   }
 }

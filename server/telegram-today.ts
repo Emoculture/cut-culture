@@ -4,7 +4,7 @@ import { createHash, timingSafeEqual } from 'node:crypto'
 export const TODAY_TIME_ZONE = 'Europe/Moscow'
 export const TODAY_UTC_OFFSET_MINUTES = 180
 export const TODAY_LIMIT = 200
-export const webhookCodes = ['WEBHOOK_CONFIG_INVALID', 'TODAY_QUERY_FAILED', 'TODAY_SEND_FAILED', 'TODAY_UNEXPECTED_FAILURE'] as const
+export const webhookCodes = ['WEBHOOK_CONFIG_INVALID', 'TODAY_QUERY_FAILED', 'TODAY_SEND_FAILED', 'BOT_CALLBACK_FAILED', 'TODAY_UNEXPECTED_FAILURE'] as const
 export type WebhookCode = typeof webhookCodes[number]
 export class TodayFailure extends Error {
   constructor(public readonly code: WebhookCode) { super(code) }
@@ -26,13 +26,31 @@ function object(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
 }
 export type ScheduleDay = 'today' | 'tomorrow'
-export function ownerScheduleCommand(body: unknown, ownerId: string): ScheduleDay | null {
-  const update = object(body), message = object(update?.message), chat = object(message?.chat), from = object(message?.from)
-  const command = typeof message?.text === 'string' ? /^\/(today|tomorrow)(?:@[A-Za-z0-9_]+)?\s*$/.exec(message.text) : null
-  const authorized = !!command && !!update && Number.isSafeInteger(update.update_id) && !!message
-    && chat?.type === 'private' && typeof chat.id === 'number' && Number.isSafeInteger(chat.id) && String(chat.id) === ownerId
+export interface OwnerBotAction { command: ScheduleDay | 'menu' | 'ignore'; callbackId?: string }
+function isOwnerPrivateChat(chat: Record<string, unknown> | null, from: Record<string, unknown> | null, ownerId: string) {
+  return chat?.type === 'private' && typeof chat.id === 'number' && Number.isSafeInteger(chat.id) && String(chat.id) === ownerId
     && typeof from?.id === 'number' && Number.isSafeInteger(from.id) && String(from.id) === ownerId && from.is_bot === false
-  return authorized ? command![1] as ScheduleDay : null
+}
+export function ownerBotAction(body: unknown, ownerId: string): OwnerBotAction | null {
+  const update = object(body)
+  if (!update || !Number.isSafeInteger(update.update_id)) return null
+  const callback = object(update.callback_query)
+  if (callback) {
+    const message = object(callback.message)
+    if (!isOwnerPrivateChat(object(message?.chat), object(callback.from), ownerId)
+      || typeof callback.id !== 'string' || !callback.id.length || callback.id.length > 256) return null
+    const command = callback.data === 'schedule:today' ? 'today' : callback.data === 'schedule:tomorrow' ? 'tomorrow' : callback.data === 'menu:main' ? 'menu' : 'ignore'
+    return { command, callbackId: callback.id }
+  }
+  const message = object(update.message)
+  if (!isOwnerPrivateChat(object(message?.chat), object(message?.from), ownerId)) return null
+  const command = typeof message?.text === 'string' ? /^\/(today|tomorrow|start|menu)(?:@[A-Za-z0-9_]+)?\s*$/.exec(message.text) : null
+  if (!command) return null
+  return { command: command[1] === 'start' || command[1] === 'menu' ? 'menu' : command[1] as ScheduleDay }
+}
+export function ownerScheduleCommand(body: unknown, ownerId: string): ScheduleDay | null {
+  const action = ownerBotAction(body, ownerId)
+  return action?.command === 'today' || action?.command === 'tomorrow' ? action.command : null
 }
 export function dayRange(now: number, day: ScheduleDay) {
   const parts = new Intl.DateTimeFormat('en-CA', { timeZone: TODAY_TIME_ZONE, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date(now))
@@ -61,14 +79,19 @@ export function scheduleMessages(rows: TodayBooking[], label: string, truncated 
   return messages
 }
 export function todayMessages(rows: TodayBooking[], label: string, truncated = false) { return scheduleMessages(rows, label, truncated, 'today') }
+export interface InlineKeyboard { inline_keyboard: { text: string; callback_data: string }[][] }
 export interface TodayDependencies {
   load(start: string, end: string): Promise<{ rows: TodayBooking[]; truncated: boolean }>
-  send(messages: string[]): Promise<void>
+  send(messages: string[], keyboard?: InlineKeyboard): Promise<void>
+  acknowledge?(callbackId: string): Promise<void>
 }
 export async function processSchedule(body: unknown, ownerId: string, deps: TodayDependencies, now = Date.now()) {
   const day = ownerScheduleCommand(body, ownerId)
   if (!day) return
+  await sendSchedule(day, deps, now)
+}
+export async function sendSchedule(day: ScheduleDay, deps: TodayDependencies, now: number, keyboard?: InlineKeyboard) {
   const range = dayRange(now, day)
   const result = await deps.load(range.start, range.end)
-  await deps.send(scheduleMessages(result.rows, range.label, result.truncated, day))
+  await deps.send(scheduleMessages(result.rows, range.label, result.truncated, day), keyboard)
 }
